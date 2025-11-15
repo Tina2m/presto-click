@@ -64,6 +64,26 @@
     .progress{height:10px;background:#eef2ff;border-radius:99px;overflow:hidden;margin-top:8px;border:1px solid var(--border)}
     .bar{height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .25s}
     pre{white-space:pre-wrap;background:#f9fafb;border:1px solid var(--border);border-radius:10px;padding:10px;max-height:260px;overflow:auto}
+    
+    /* Read statistics funnel chart */
+    .read-stats-container{font-size:12px}
+    .funnel-chart{display:flex;flex-direction:column;gap:6px;align-items:center;padding:8px 0}
+    .funnel-bar{
+      background:#fff;border:1px solid var(--border);border-radius:8px;padding:10px 14px;
+      display:flex;flex-direction:column;align-items:center;position:relative;transition:all 0.5s ease;
+      box-shadow:0 2px 4px rgba(0,0,0,0.05);min-width:200px;max-width:100%
+    }
+    .funnel-bar-label{font-weight:600;margin-bottom:6px;color:var(--text);font-size:13px}
+    .funnel-bar-value{font-size:15px;font-weight:700;margin-bottom:4px;color:var(--text)}
+    .funnel-bar-percentage{font-size:11px;color:var(--muted);margin-top:2px}
+    .funnel-bar.initial{
+      background:linear-gradient(135deg,#fff5f0,#ffe4d6);border-color:#fdba74;
+      width:100%
+    }
+    .funnel-bar.filter{
+      background:linear-gradient(135deg,#eff6ff,#dbeafe);border-color:#93c5fd
+    }
+    .funnel-separator{width:60%;height:2px;background:linear-gradient(90deg,transparent,var(--border),transparent);margin:2px 0}
     @media (max-width:1100px){ .wrap{flex-direction:column} .left{min-width:auto} .right{width:auto;position:relative;top:0} }
   </style>
 </head>
@@ -99,6 +119,9 @@
           </div>
         </div>
 
+        <h2>Artifacts</h2>
+        <div id="arts"></div>
+
         <!-- ===== Units toolbar & grouped container ===== -->
         <h2>2) Units</h2>
         <div class="units-toolbar">
@@ -110,22 +133,8 @@
         </div>
         <div id="unit-groups" class="unit-groups"></div>
 
-        <h2>3) Pipeline</h2>
-        <div class="row mb8">
-          <button id="pipe-validate" class="secondary">Validate</button>
-          <button id="pipe-run">Run pipeline</button>
-          <button id="pipe-clear" class="secondary">Clear</button>
-          <span id="pipe-msg" class="muted"></span>
-        </div>
-
-        <h2>State</h2>
-        <div id="state" class="mb8"></div>
-
         <h2>Last step log</h2>
         <pre id="log" class="mb8"></pre>
-
-        <h2>Artifacts</h2>
-        <div id="arts"></div>
       </div>
     </main>
 
@@ -137,12 +146,27 @@
         <h3 class="mt8">Flow</h3>
         <div id="flow" class="flow"></div>
 
+        <h3 class="mt8">Pipeline</h3>
+        <div class="row mb8">
+          <button id="pipe-validate" class="secondary">Validate</button>
+          <button id="pipe-run">Run pipeline</button>
+          <button id="pipe-stop" class="secondary" style="display:none;background:#dc2626;color:#fff;border-color:#dc2626">Stop</button>
+          <button id="pipe-clear" class="secondary">Clear</button>
+        </div>
+        <div id="pipe-msg" class="muted" style="font-size:12px; margin-top:4px"></div>
+
+        <h3 class="mt8">State</h3>
+        <div id="state" class="mb8 muted" style="font-size:13px"></div>
+
         <h3 class="mt8">Validation</h3>
         <div id="validation" class="muted">—</div>
 
         <h3 class="mt8">Run status</h3>
         <div id="run-status" class="muted">—</div>
         <div class="progress"><div id="run-bar" class="bar"></div></div>
+
+        <h3 class="mt8">Read statistics</h3>
+        <div id="read-stats" class="read-stats-container"></div>
       </div>
     </aside>
   </div>

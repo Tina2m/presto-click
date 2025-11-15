@@ -2,6 +2,9 @@
 let SID = null;
 let UNITS_META = [];
 let PIPELINE = []; // keeps {unit, label, card} in the order of user clicks
+let CURRENT_RUN_START_STEP = null; // Track starting step index for current pipeline run
+let PIPELINE_RUNNING = false; // Track if pipeline is currently running
+let PIPELINE_STOP_REQUESTED = false; // Flag to stop pipeline execution
 
 const $  = sel => document.querySelector(sel);
 const $$ = sel => document.querySelectorAll(sel);
@@ -49,6 +52,120 @@ function drawFlow(){
 function pipeMsg(text, cls='muted'){ const p = $('#pipe-msg'); p.className = cls; p.textContent = text; }
 function setRunStatus(text){ $('#run-status').innerHTML = text; }
 function setProgress(i, n){ const pct = n ? Math.round((i/n)*100) : 0; $('#run-bar').style.width = pct + '%'; }
+
+/* ===== Read Statistics Visualization ===== */
+function formatNumber(num){
+  if(!num && num !== 0) return '—';
+  if(num >= 1000000) return (num/1000000).toFixed(3).replace(/\.?0+$/, '') + 'M';
+  if(num >= 1000) return (num/1000).toFixed(1).replace(/\.0$/, '') + 'k';
+  return num.toString();
+}
+
+async function updateReadStats(clearFirst = false){
+  if(!SID) return;
+  const container = $('#read-stats');
+  if(!container) return;
+  
+  // Clear container if requested (e.g., at start of new pipeline run)
+  if(clearFirst) {
+    container.innerHTML = '<span class="muted">Running pipeline...</span>';
+    return;
+  }
+  
+  try{
+    const r = await fetch(`/session/${SID}/stats`);
+    if(!r.ok) throw new Error('Failed to fetch stats');
+    const data = await r.json();
+    
+    if(!data.steps || data.steps.length === 0){
+      container.innerHTML = '<span class="muted">No statistics available yet. Run pipeline steps to see read counts.</span>';
+      return;
+    }
+    
+    // Filter to only show steps from the current pipeline run
+    let filteredSteps = data.steps;
+    if(CURRENT_RUN_START_STEP !== null) {
+      filteredSteps = data.steps.filter(step => step.step_index >= CURRENT_RUN_START_STEP);
+    }
+    
+    if(filteredSteps.length === 0){
+      container.innerHTML = '<span class="muted">No statistics available yet. Run pipeline steps to see read counts.</span>';
+      return;
+    }
+    
+    // Get initial reads from the first step of current run
+    const firstStep = filteredSteps[0];
+    const initialReads = firstStep?.input || firstStep?.total || data.initial_reads;
+    if(!initialReads){
+      container.innerHTML = '<span class="muted">Waiting for initial read count...</span>';
+      return;
+    }
+    
+    const chart = document.createElement('div');
+    chart.className = 'funnel-chart';
+    
+    // Calculate max width for funnel effect (100% for first bar)
+    const maxWidth = 100; // percentage
+    
+    // Add initial reads bar (Total reads)
+    if(initialReads){
+      const firstBar = document.createElement('div');
+      firstBar.className = 'funnel-bar initial';
+      firstBar.style.width = maxWidth + '%';
+      firstBar.innerHTML = `
+        <div class="funnel-bar-label">Total reads</div>
+        <div class="funnel-bar-value">${formatNumber(initialReads)}</div>
+        <div class="funnel-bar-percentage">100%</div>
+      `;
+      chart.appendChild(firstBar);
+      
+      if(filteredSteps.length > 0){
+        const sep = document.createElement('div');
+        sep.className = 'funnel-separator';
+        chart.appendChild(sep);
+      }
+    }
+    
+    // Add bars for each filtering step (showing passed reads)
+    filteredSteps.forEach((step, idx) => {
+      // Use pass count if available, otherwise use total
+      const passCount = step.pass !== null && step.pass !== undefined ? step.pass : (step.total || 0);
+      if(passCount === 0 && !step.pass) return; // Skip if no meaningful data
+      
+      const bar = document.createElement('div');
+      bar.className = 'funnel-bar filter';
+      const percentage = initialReads ? Math.round((passCount / initialReads) * 100) : 0;
+      
+      // Calculate width as percentage of initial reads to create funnel effect
+      const widthPercent = initialReads ? Math.max(15, (passCount / initialReads) * 100) : 15;
+      bar.style.width = widthPercent + '%';
+      
+      // Shorten label if too long
+      let label = esc(step.label || step.unit);
+      if(label.length > 30) label = label.substring(0, 27) + '...';
+      
+      bar.innerHTML = `
+        <div class="funnel-bar-label">${label}</div>
+        <div class="funnel-bar-value">passed ${formatNumber(passCount)}</div>
+        <div class="funnel-bar-percentage">${percentage}%</div>
+      `;
+      chart.appendChild(bar);
+      
+      // Add separator between steps (except after last)
+      if(idx < filteredSteps.length - 1){
+        const sep = document.createElement('div');
+        sep.className = 'funnel-separator';
+        chart.appendChild(sep);
+      }
+    });
+    
+    container.innerHTML = '';
+    container.appendChild(chart);
+  }catch(e){
+    console.error('Failed to update read stats:', e);
+    container.innerHTML = '<span class="muted">Statistics unavailable</span>';
+  }
+}
 
 async function startSession(){
   const r = await fetch('/session/start',{method:'POST'});
@@ -111,6 +228,7 @@ async function runUnit(card, unitId){
     return false;
   }
   await refreshState();
+  await updateReadStats(); // Update statistics after each step
   const stepIdx = j.step.step_index;
   const lr = await fetch(`/session/${SID}/log/${stepIdx}`);
   $('#log').textContent = await lr.text();
@@ -125,6 +243,7 @@ async function refreshState(){
   const arts = Object.values(s.artifacts||{}).map(a => `<div>${esc(a.name)} — <a href="/session/${SID}/download/${encodeURIComponent(a.name)}">download</a></div>`).join('');
   $('#arts').innerHTML = arts || '<span class="muted">none</span>';
   window.__SESSION_STATE__ = s;
+  await updateReadStats(); // Update statistics visualization
 }
 
 /* -------------------- New grouped render -------------------- */
@@ -325,6 +444,8 @@ function validatePipeline(){
 
 /* ===== Run Pipeline ===== */
 async function runPipeline(){
+  if(PIPELINE_RUNNING) return;
+  
   const steps = selectedSteps();
   const bulkSteps = steps.filter(st => !(st.unit || '').startsWith('sc_'));
   if(bulkSteps.length === 0){ pipeMsg('No bulk steps selected','warn'); return; }
@@ -332,16 +453,79 @@ async function runPipeline(){
     pipeMsg('Single-cell units removed from pipeline','warn');
   }
   validatePipeline(); // show current validation info
+  
+  // Get current state to determine starting step index for this run
+  try {
+    const stateRes = await fetch(`/session/${SID}/state`);
+    const state = await stateRes.json();
+    // Set the starting step index to the next step (or 0 if no steps yet)
+    CURRENT_RUN_START_STEP = (state.steps && state.steps.length > 0) 
+      ? Math.max(...state.steps.map(s => s.step_index)) + 1 
+      : 0;
+  } catch(e) {
+    CURRENT_RUN_START_STEP = 0;
+  }
+  
+  // Clear read statistics at the start of a new pipeline run
+  await updateReadStats(true);
+  
+  // Reset stop flag and set running state
+  PIPELINE_STOP_REQUESTED = false;
+  PIPELINE_RUNNING = true;
+  
+  // Update UI: show stop button, disable run button
+  $('#pipe-run').style.display = 'none';
+  $('#pipe-stop').style.display = '';
+  $('#pipe-validate').disabled = true;
+  $('#pipe-clear').disabled = true;
+  
   setRunStatus('Starting…'); setProgress(0, bulkSteps.length);
 
   for(let i=0;i<bulkSteps.length;i++){
+    // Check if stop was requested
+    if(PIPELINE_STOP_REQUESTED){
+      setRunStatus(`Stopped at step ${i}/${bulkSteps.length}`);
+      pipeMsg('Pipeline stopped by user','warn');
+      break;
+    }
+    
     const s = bulkSteps[i];
     setRunStatus(`Running <b>${esc(s.label)}</b> (${i+1}/${bulkSteps.length})`);
     const ok = await runUnit(s.card, s.unit);
     setProgress(i+1, bulkSteps.length);
-    if(!ok){ setRunStatus(`Failed at <b>${esc(s.label)}</b> (${i+1}/${bulkSteps.length})`); pipeMsg('Pipeline failed','err'); return; }
+    
+    if(!ok){ 
+      setRunStatus(`Failed at <b>${esc(s.label)}</b> (${i+1}/${bulkSteps.length})`); 
+      pipeMsg('Pipeline failed','err'); 
+      break;
+    }
   }
-  setRunStatus('Finished ✅'); pipeMsg('Pipeline finished','ok');
+  
+  // Check if stopped before resetting flag
+  const wasStopped = PIPELINE_STOP_REQUESTED;
+  
+  // Reset running state
+  PIPELINE_RUNNING = false;
+  PIPELINE_STOP_REQUESTED = false;
+  
+  // Update UI: hide stop button, enable run button
+  $('#pipe-run').style.display = '';
+  $('#pipe-stop').style.display = 'none';
+  $('#pipe-validate').disabled = false;
+  $('#pipe-clear').disabled = false;
+  
+  if(!wasStopped){
+    setRunStatus('Finished ✅'); 
+    pipeMsg('Pipeline finished','ok');
+  }
+  await updateReadStats(); // Final update of statistics
+}
+
+function stopPipeline(){
+  if(!PIPELINE_RUNNING) return;
+  PIPELINE_STOP_REQUESTED = true;
+  setRunStatus('Stopping pipeline…');
+  pipeMsg('Stopping pipeline…','warn');
 }
 
 /* ===== Wire up ===== */
@@ -351,7 +535,12 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#upload-aux')?.addEventListener('click', uploadAux);
   $('#pipe-validate')?.addEventListener('click', validatePipeline);
   $('#pipe-run')?.addEventListener('click', runPipeline);
+  $('#pipe-stop')?.addEventListener('click', stopPipeline);
   $('#pipe-clear')?.addEventListener('click', ()=>{
+    if(PIPELINE_RUNNING){
+      if(!confirm('Pipeline is running. Stop and clear?')) return;
+      stopPipeline();
+    }
     $$('.pipe-add').forEach(c=>c.checked=false);
     PIPELINE = [];
     drawFlow(); $('#validation').textContent='—'; pipeMsg('Pipeline cleared');
