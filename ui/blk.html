@@ -84,6 +84,26 @@
       background:linear-gradient(135deg,#eff6ff,#dbeafe);border-color:#93c5fd
     }
     .funnel-separator{width:60%;height:2px;background:linear-gradient(90deg,transparent,var(--border),transparent);margin:2px 0}
+    
+    /* Read statistics funnel chart */
+    .read-stats-container{font-size:12px}
+    .funnel-chart{display:flex;flex-direction:column;gap:6px;align-items:center;padding:8px 0}
+    .funnel-bar{
+      background:#fff;border:1px solid var(--border);border-radius:8px;padding:10px 14px;
+      display:flex;flex-direction:column;align-items:center;position:relative;transition:all 0.5s ease;
+      box-shadow:0 2px 4px rgba(0,0,0,0.05);min-width:200px;max-width:100%
+    }
+    .funnel-bar-label{font-weight:600;margin-bottom:6px;color:var(--text);font-size:13px}
+    .funnel-bar-value{font-size:15px;font-weight:700;margin-bottom:4px;color:var(--text)}
+    .funnel-bar-percentage{font-size:11px;color:var(--muted);margin-top:2px}
+    .funnel-bar.initial{
+      background:linear-gradient(135deg,#fff5f0,#ffe4d6);border-color:#fdba74;
+      width:100%
+    }
+    .funnel-bar.filter{
+      background:linear-gradient(135deg,#eff6ff,#dbeafe);border-color:#93c5fd
+    }
+    .funnel-separator{width:60%;height:2px;background:linear-gradient(90deg,transparent,var(--border),transparent);margin:2px 0}
     @media (max-width:1100px){ .wrap{flex-direction:column} .left{min-width:auto} .right{width:auto;position:relative;top:0} }
   </style>
 </head>
@@ -118,6 +138,9 @@
             <div class="muted mt8">Primer FASTA uploads are auto-recognized and wired into MaskPrimers (V/C).</div>
           </div>
         </div>
+
+        <h2>Artifacts</h2>
+        <div id="arts"></div>
 
         <h2>Artifacts</h2>
         <div id="arts"></div>
@@ -168,6 +191,9 @@
         <h3 class="mt8">Run status</h3>
         <div id="run-status" class="muted">—</div>
         <div class="progress"><div id="run-bar" class="bar"></div></div>
+
+        <h3 class="mt8">Read statistics</h3>
+        <div id="read-stats" class="read-stats-container"></div>
 
         <h3 class="mt8">Read statistics</h3>
         <div id="read-stats" class="read-stats-container"></div>
