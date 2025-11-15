@@ -1142,7 +1142,7 @@ UNITS: Dict[str, UnitSpec] = {
     ),
     "filter_repeats": U_FilterRepeats(
         id="filter_repeats", label="FilterSeq: repeats", requires=["R1"], group="bulk",
-        params_schema={"max_repeat":{"type":"text","default":"0.8"},"missing":{"type":"select","options":["false","true"],"default":"false"},"inner":{"type":"select","options":["false","true"],"default":"false"}}
+        params_schema={"max_repeat":{"type":"text","default":"8"},"missing":{"type":"select","options":["false","true"],"default":"false"},"inner":{"type":"select","options":["false","true"],"default":"false"}}
     ),
     "filter_trimqual": U_FilterTrimQual(
         id="filter_trimqual", label="FilterSeq: trimqual", requires=["R1"], group="bulk",
@@ -1400,3 +1400,90 @@ def get_log(sid: str, step_index: int):
     logs = sorted([p for p in sdir.iterdir() if p.name.startswith(prefix) and p.suffix == ".log"])
     if not logs: raise HTTPException(404, "Log not found")
     return "\n\n".join(p.read_text(errors="ignore") for p in logs)
+
+@app.get("/session/{sid}/stats")
+def get_pipeline_stats(sid: str):
+    """Parse PASS/FAIL statistics from all executed steps in the pipeline."""
+    import re
+    sdir = BASE / sid
+    s = load_state(sdir)
+    
+    stats = []
+    initial_reads = None
+    
+    # Get all executed steps in order
+    if not hasattr(s, 'steps') or not s.steps:
+        return {"steps": [], "initial_reads": None}
+    
+    for step in sorted(s.steps, key=lambda x: x.step_index):
+        step_idx = step.step_index
+        prefix = f"{step_idx:03d}_"
+        logs = sorted([p for p in sdir.iterdir() if p.name.startswith(prefix) and p.suffix == ".log"])
+        
+        if not logs:
+            continue
+            
+        # Read log content
+        log_content = ""
+        for log_file in logs:
+            try:
+                log_content += log_file.read_text(errors="ignore") + "\n"
+            except:
+                pass
+        
+        # Parse PASS/FAIL from log (for bulk FilterSeq units)
+        # Pattern: "PASS> 23124" or "SEQUENCES> 23124" or "OUTPUT> R1_m10_missing-pass.fastq"
+        pass_match = re.search(r'PASS>\s*(\d+)', log_content, re.IGNORECASE)
+        fail_match = re.search(r'FAIL>\s*(\d+)', log_content, re.IGNORECASE)
+        seq_match = re.search(r'SEQUENCES>\s*(\d+)', log_content, re.IGNORECASE)
+        
+        # Parse row counts from log (for single-cell units)
+        # Pattern: "Wrote SC_productive.tsv rows: 12345" or "rows: 12345"
+        rows_match = re.search(r'rows:\s*(\d+)', log_content, re.IGNORECASE)
+        
+        pass_count = None
+        fail_count = None
+        input_count = None  # SEQUENCES is the input count
+        row_count = None  # For single-cell units
+        
+        if pass_match:
+            pass_count = int(pass_match.group(1))
+        if fail_match:
+            fail_count = int(fail_match.group(1))
+        if seq_match:
+            input_count = int(seq_match.group(1))
+        if rows_match:
+            row_count = int(rows_match.group(1))
+        
+        # For single-cell units, use row_count as pass_count
+        if row_count is not None and pass_count is None:
+            pass_count = row_count
+        
+        # Get initial reads from first step's input (SEQUENCES for bulk, or first row count for SC)
+        # For the first step, use its input if available, otherwise use its output as baseline
+        if initial_reads is None:
+            if input_count is not None:
+                initial_reads = input_count
+            elif row_count is not None:
+                initial_reads = row_count
+            elif pass_count is not None:
+                # Fallback: if we only have pass count on first step, use it as initial estimate
+                initial_reads = pass_count
+        
+        # Only add stats if we have meaningful data (pass count for filtering steps, or row count for SC)
+        if pass_count is not None or row_count is not None:
+            unit_obj = UNITS.get(step.unit)
+            label = unit_obj.label if unit_obj else step.unit
+            # Use pass_count (which may be from row_count for SC units)
+            final_pass = pass_count if pass_count is not None else row_count
+            stats.append({
+                "step_index": step_idx,
+                "unit": step.unit,
+                "label": label,
+                "pass": final_pass,
+                "fail": fail_count,
+                "input": input_count if input_count else (row_count if row_count and step_idx == 0 else None),  # Input count for this step
+                "percentage": round((final_pass / initial_reads * 100), 1) if (final_pass is not None and initial_reads) else None
+            })
+    
+    return {"steps": stats, "initial_reads": initial_reads}

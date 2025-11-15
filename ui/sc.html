@@ -58,7 +58,7 @@
 
         <section aria-labelledby="lastlog">
           <h2 id="lastlog">Last step log</h2>
-          <pre id="log" class="mb8"></pre>
+          <div id="log" class="mb8" style="max-height:500px;overflow-y:auto;background:#f9fafb;border:1px solid var(--border);border-radius:10px;padding:10px;font-family:monospace;font-size:12px;line-height:1.5"></div>
         </section>
 
         <section aria-labelledby="arts">
@@ -74,6 +74,7 @@
         <div class="row mt8">
           <button id="validate" class="secondary">Validate</button>
           <button id="runflow">Run pipeline</button>
+          <button id="stopflow" class="secondary" style="display:none;background:#dc2626;color:#fff">Stop</button>
           <button id="clearflow" class="secondary">Clear</button>
         </div>
         <div class="mt8">
@@ -90,7 +91,11 @@
         </div>
         <div class="mt8">
           <h3>Notes</h3>
-          <div class="muted">Use “Add to flow” on any card to build a pipeline. Order is preserved by your clicks. Units here are independent and operate on uploaded TSVs.</div>
+          <div class="muted">Use "Add to flow" on any card to build a pipeline. Order is preserved by your clicks. Units here are independent and operate on uploaded TSVs.</div>
+        </div>
+        <div class="mt8">
+          <h3>Read statistics</h3>
+          <div id="read-stats" class="read-stats-container"></div>
         </div>
       </div>
     </aside>
