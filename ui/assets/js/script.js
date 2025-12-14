@@ -33,8 +33,8 @@ Object.entries(CATEGORIES).forEach(([cat, ids])=>ids.forEach(id=>CAT_BY_ID[id]=c
 function unitCategory(id){ return CAT_BY_ID[id] || "Other"; }
 
 function selectedSteps(){
-  // Return pipeline in click order, but drop items whose checkbox is no longer checked
-  PIPELINE = PIPELINE.filter(s => s.card && s.card.querySelector('.pipe-add')?.checked);
+  // Return pipeline in click order, but drop items whose add-button is no longer active
+  PIPELINE = PIPELINE.filter(s => s.card && s.card.querySelector('.pipe-add')?.classList.contains('active'));
   return [...PIPELINE];
 }
 
@@ -184,8 +184,22 @@ async function uploadReads(){
   const fd = new FormData(); fd.append('r1', r1);
   const r2 = $('#r2f').files[0]; if(r2) fd.append('r2', r2);
   const r = await fetch(`/session/${SID}/upload`, {method:'POST', body:fd});
-  if(!r.ok){ alert('Upload failed'); return; }
+  let j = null;
+  try { j = await r.json(); } catch(e) {}
+  if(!r.ok){
+    const msg = (j && j.detail && (j.detail.error || j.detail)) || 'Upload failed';
+    alert(msg);
+    const out = $('#reads-out'); if(out) out.textContent = 'Upload failed';
+    return;
+  }
   await refreshState();
+  const out = $('#reads-out');
+  if(out){
+    const state = window.__SESSION_STATE__ || {};
+    const current = state.current || {};
+    const names = [current.R1, current.R2].filter(Boolean);
+    out.textContent = names.length ? `Uploaded: ${names.join(' + ')}` : 'Uploaded';
+  }
 }
 
 async function uploadAux(){
@@ -284,21 +298,30 @@ function makeUnitCard(u){
     ${paramsHTML}
     <div class="actions">
       <button class="run">Run</button>
-      <label class="row"><input type="checkbox" class="pipe-add" data-unit-id="${esc(u.id)}"> Add to pipeline</label>
+      <button type="button" class="pipe-add secondary" data-unit-id="${esc(u.id)}">Add to pipeline</button>
     </div>`;
 
   card.querySelector('.run').addEventListener('click', ()=>runUnit(card,u.id));
-  const chk = card.querySelector('.pipe-add');
-  chk.addEventListener('change', () => {
-    const unitId = chk.dataset.unitId || card.dataset.unit;
-    const meta = UNITS_META.find(m => m.id === unitId) || {};
-    const label = meta.label || unitId;
+  const pipeBtn = card.querySelector('.pipe-add');
+  const unitId = pipeBtn.dataset.unitId || card.dataset.unit;
+  const meta = UNITS_META.find(m => m.id === unitId) || {};
+  const label = meta.label || unitId;
 
-    if (chk.checked) {
+  const setBtnState = (active) => {
+    pipeBtn.classList.toggle('active', active);
+    pipeBtn.textContent = active ? 'Added' : 'Add to pipeline';
+  };
+  setBtnState(false);
+
+  pipeBtn.addEventListener('click', () => {
+    const isActive = pipeBtn.classList.contains('active');
+    if (isActive) {
       PIPELINE = PIPELINE.filter(s => s.unit !== unitId);
-      PIPELINE.push({unit: unitId, label, card});
+      setBtnState(false);
     } else {
       PIPELINE = PIPELINE.filter(s => s.unit !== unitId);
+      PIPELINE.push({unit: unitId, label, card});
+      setBtnState(true);
     }
     drawFlow();
   });
@@ -541,7 +564,10 @@ document.addEventListener('DOMContentLoaded', () => {
       if(!confirm('Pipeline is running. Stop and clear?')) return;
       stopPipeline();
     }
-    $$('.pipe-add').forEach(c=>c.checked=false);
+    $$('.pipe-add').forEach(btn=>{
+      btn.classList.remove('active');
+      btn.textContent = 'Add to pipeline';
+    });
     PIPELINE = [];
     drawFlow(); $('#validation').textContent='—'; pipeMsg('Pipeline cleared');
   });

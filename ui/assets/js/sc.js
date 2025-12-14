@@ -5,10 +5,26 @@ let FLOW = []; // [{unitId,label,params}]
 let running = false;
 let CURRENT_RUN_START_STEP = null; // Track starting step index for current pipeline run
 let STOP_REQUESTED = false; // Flag to stop pipeline execution
+let LOG_EXPANDED = false;
+let RUN_HISTORY = [];
+let SELECTED_RUN_ID = null;
+let CURRENT_RUN_ID = null;
 
 const $  = sel => document.querySelector(sel);
 const $$ = sel => document.querySelectorAll(sel);
 const esc = s => (s??'').toString().replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const FLOW_LABELS = {
+  sc_merge_samples: 'Merge Samples',
+  sc_filter_productive: 'Keep Productive Seqs',
+  sc_remove_multi_heavy: 'Remove cells with Multiple IgH',
+  sc_remove_no_heavy: 'Remove cells winth No IgH',
+};
+function cleanLabel(label=''){
+  return label.replace(/^SC:\s*/i,'').trim();
+}
+function flowLabel(unitId, fallback){
+  return FLOW_LABELS[unitId] || fallback;
+}
 
 // ----- Session (auto) -----
 async function ensureSession(){
@@ -85,6 +101,7 @@ function buildUnitCard(u){
   const card = document.createElement('div');
   card.className = 'unit-card';
   card.dataset.unit = u.id;
+  const displayLabel = cleanLabel(u.label || u.id);
 
   const requires = (u.requires||[]).map(x=>`<span class="pill">${esc(x)}</span>`).join(' ') || '<span class="muted">none</span>';
   let paramsHTML = '';
@@ -103,7 +120,7 @@ function buildUnitCard(u){
 
   card.innerHTML = `
     <div class="uc-head">
-      <div class="uc-title">${esc(u.label)}</div>
+      <div class="uc-title">${esc(displayLabel)}</div>
       <div class="req">requires: ${requires}</div>
       <button class="params-toggle" title="Show/Hide parameters">Parameters</button>
     </div>
@@ -111,7 +128,7 @@ function buildUnitCard(u){
       <div class="params-wrap">${paramsHTML || '<div class="muted">No parameters</div>'}</div>
       <div class="row mt8">
         <button class="run">Run</button>
-        <button class="secondary addflow">Add to flow</button>
+        <button class="secondary addflow">Add to pipeline</button>
       </div>
     </div>`;
 
@@ -120,8 +137,8 @@ function buildUnitCard(u){
   card.querySelector('.params-toggle').addEventListener('click', ()=>{
     pwrap.classList.toggle('open');
   });
-  card.querySelector('.run').addEventListener('click', ()=>runSingle(card, u.id, u.label));
-  card.querySelector('.addflow').addEventListener('click', ()=>addToFlow(card, u.id, u.label));
+  card.querySelector('.run').addEventListener('click', ()=>runSingle(card, u.id, displayLabel));
+  card.querySelector('.addflow').addEventListener('click', ()=>addToFlow(card, u.id, displayLabel));
 
   return card;
 }
@@ -183,35 +200,99 @@ function collapseAll(){ $$('.unit-group').forEach(g=>g.classList.remove('open'))
 // ----- Flow builder -----
 function addToFlow(card, unitId, label){
   const params = collectParams(card);
-  FLOW.push({unitId, label, params});
+  const flowTitle = flowLabel(unitId, label);
+  FLOW.push({unitId, label, flowTitle, params});
   renderFlow();
 }
 function removeFromFlow(idx){
   FLOW.splice(idx,1);
   renderFlow();
 }
+async function runSingle(card, unitId, label){
+  const params = collectParams(card);
+  const btn = card.querySelector('.run');
+  if(btn) btn.disabled = true;
+  if(btn){
+    btn.dataset.originalText = btn.textContent;
+    btn.textContent = 'Running…';
+  }
+  try{
+    await updateReadStats(true);
+    const ok = await runUnit({unitId, label, params}, null);
+    if(ok){
+      $('#pstate').textContent = `Ran ${label}`;
+    }
+  }finally{
+    if(btn) btn.disabled = false;
+    if(btn && btn.dataset.originalText){
+      btn.textContent = btn.dataset.originalText;
+      delete btn.dataset.originalText;
+    }
+  }
+}
+function setLogExpanded(expanded){
+  LOG_EXPANDED = expanded;
+  const log = $('#log');
+  const btn = $('#log-toggle');
+  if(log){
+    if(expanded) log.classList.remove('collapsed');
+    else log.classList.add('collapsed');
+  }
+  if(btn){
+    btn.textContent = expanded ? 'Collapse' : 'Expand';
+    btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  }
+}
+function toggleLog(){
+  setLogExpanded(!LOG_EXPANDED);
+}
 function renderFlow(){
   const ul = $('#flow'); ul.innerHTML = '';
   if(FLOW.length === 0){
-    ul.innerHTML = '<li class="muted">No steps yet. Use “Add to flow”.</li>';
+    ul.innerHTML = '<li class="muted">No steps yet. Use “Add to pipeline”.</li>';
   } else {
     FLOW.forEach((s,i)=>{
       const li = document.createElement('li');
       li.className = 'flow-item';
+      const labelText = s.flowTitle || s.label;
       li.innerHTML = `<div class="flow-step">${i+1}</div>
-                      <div class="flow-label">${esc(s.label)} <span class="muted">(${esc(s.unitId)})</span></div>
+                      <div class="flow-label" title="${esc(s.label)}">${esc(labelText)}</div>
                       <button class="flow-remove" title="Remove">✕</button>`;
       li.querySelector('.flow-remove').addEventListener('click', ()=>removeFromFlow(i));
       ul.appendChild(li);
     });
   }
-  $('#validation').innerHTML = '—';
+  $('#validation').innerHTML = '-';
+}
+
+function serializeFlow(){
+  return FLOW.map(step => ({
+    unitId: step.unitId,
+    label: step.label,
+    flowTitle: step.flowTitle,
+    params: JSON.parse(JSON.stringify(step.params || {})),
+  }));
+}
+
+function hydrateFlowFromPipeline(pipeline){
+  const cloned = (pipeline || []).map(step => {
+    const unitId = step.unitId || step.unit || '';
+    const baseLabel = step.label || step.flowTitle || unitId;
+    return {
+      unitId,
+      label: baseLabel,
+      flowTitle: step.flowTitle || baseLabel,
+      params: JSON.parse(JSON.stringify(step.params || {})),
+    };
+  });
+  FLOW = cloned;
+  renderFlow();
 }
 
 // ----- Validation & run -----
 function validateFlow(){
   if(FLOW.length === 0){
-    $('#validation').innerHTML = `<span class="pill err">Empty flow</span> Add steps with “Add to flow”.`;
+    $('#validation').innerHTML = `<span class="pill err">Empty flow</span> Add steps with “Add to pipeline”.`;
     return {ok:false, msgs:['Empty flow']};
   }
   const msgs = [];
@@ -219,7 +300,7 @@ function validateFlow(){
 
   const idxMerge = FLOW.findIndex(s=>s.unitId==='sc_merge_samples');
   if(idxMerge > 0){
-    msgs.push('Suggestion: Place “SC: Merge samples” first for efficiency (optional).');
+    msgs.push('Suggestion: Place “Merge samples” first for efficiency (optional).');
   }
 
   const idxMH = FLOW.findIndex(s=>s.unitId==='sc_remove_multi_heavy');
@@ -246,12 +327,24 @@ async function runFlow(){
     alert('Please fix flow issues and try again.');
     return;
   }
-  
-  // Get current state to determine starting step index for this run
+
+  const runId = (crypto?.randomUUID ? crypto.randomUUID() : `run-${Date.now()}`);
+  const runLabel = `Run ${new Date().toLocaleString()}`;
+  CURRENT_RUN_ID = runId;
+  const pipelineSnapshot = serializeFlow();
+  try{
+    await fetch(`/session/${SID}/run/start`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({run_id: runId, label: runLabel, reset_sc_table: true, pipeline: pipelineSnapshot})
+    });
+  }catch(e){
+    console.warn('Failed to register run', e);
+  }
+
   try {
     const stateRes = await fetch(`/session/${SID}/state`);
     const state = await stateRes.json();
-    // Set the starting step index to the next step (or 0 if no steps yet)
     CURRENT_RUN_START_STEP = (state.steps && state.steps.length > 0) 
       ? Math.max(...state.steps.map(s => s.step_index)) + 1 
       : 0;
@@ -259,14 +352,10 @@ async function runFlow(){
     CURRENT_RUN_START_STEP = 0;
   }
   
-  // Clear read statistics at the start of a new pipeline run
   await updateReadStats(true);
-  
-  // Reset stop flag and set running state
   STOP_REQUESTED = false;
   running = true;
   
-  // Update UI: show stop button, disable run button
   $('#runflow').style.display = 'none';
   $('#stopflow').style.display = '';
   $('#validate').disabled = true;
@@ -274,7 +363,6 @@ async function runFlow(){
   
   $('#pstate').textContent = `starting (${FLOW.length} steps)…`;
   for(let i=0;i<FLOW.length;i++){
-    // Check if stop was requested
     if(STOP_REQUESTED){
       $('#pstate').textContent = `stopped at step ${i}/${FLOW.length}`;
       break;
@@ -282,21 +370,17 @@ async function runFlow(){
     
     const s = FLOW[i];
     $('#pstate').textContent = `running step ${i+1}/${FLOW.length}: ${s.label}`;
-    const ok = await runUnit(s);
+    const ok = await runUnit(s, runId);
     if(!ok){
       $('#pstate').textContent = `failed at step ${i+1}: ${s.label}`;
       break;
     }
   }
   
-  // Check if stopped before resetting flag
   const wasStopped = STOP_REQUESTED;
-  
-  // Reset running state
   running = false;
   STOP_REQUESTED = false;
   
-  // Update UI: hide stop button, enable run button
   $('#runflow').style.display = '';
   $('#stopflow').style.display = 'none';
   $('#validate').disabled = false;
@@ -306,6 +390,7 @@ async function runFlow(){
     $('#pstate').textContent = 'finished ✓';
   }
   await updateReadStats(); // Final update of statistics
+  CURRENT_RUN_ID = null;
 }
 
 function stopFlow(){
@@ -314,13 +399,13 @@ function stopFlow(){
   $('#pstate').textContent = 'stopping…';
 }
 
-async function runUnit(step){
+async function runUnit(step, runId = null){
   await ensureSession();
   try{
     const r = await fetch(`/session/${SID}/run`, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ unit_id: step.unitId, params: step.params })
+      body: JSON.stringify({ unit_id: step.unitId, params: step.params, run_id: runId })
     });
     const j = await r.json();
     if(!r.ok){
@@ -333,6 +418,7 @@ async function runUnit(step){
           `<div style="border-top:2px solid var(--err);padding-top:8px;margin-top:8px;color:var(--err);font-weight:600">❌ Error in step: ${esc(step.label)}</div>` +
           `<pre style="background:#fef2f2;border-color:#fecaca">${esc(errorLog)}</pre>`;
         logEl.scrollTop = logEl.scrollHeight;
+      setLogExpanded(true);
       }
       return false;
     }
@@ -351,6 +437,7 @@ async function runUnit(step){
         `<pre>${esc(logText)}</pre>`;
       // Auto-scroll to bottom
       logEl.scrollTop = logEl.scrollHeight;
+      setLogExpanded(true);
     }
     return true;
   }catch(e){
@@ -366,150 +453,316 @@ async function refreshState(){
   const s = await r.json();
   const chips = Object.entries(s.current||{}).map(([k,v]) => `<span class="pill">${esc(k)}: ${esc(v)}</span>`).join(' ');
   $('#statebox').innerHTML = chips || '<span class="muted">no state</span>';
-  const arts = Object.values(s.artifacts||{}).map(a =>
-    `<div>${esc(a.name)} — <a href="/session/${SID}/download/${encodeURIComponent(a.name)}">download</a></div>`
-  ).join('');
-  $('#arts').innerHTML = arts || '<span class="muted">none</span>';
   await updateReadStats(); // Update statistics visualization
 }
 
 /* ===== Read Statistics Visualization ===== */
-function formatNumber(num){
-  if(!num && num !== 0) return '—';
-  if(num >= 1000000) return (num/1000000).toFixed(3).replace(/\.?0+$/, '') + 'M';
-  if(num >= 1000) return (num/1000).toFixed(1).replace(/\.0$/, '') + 'k';
-  return num.toString();
-}
-
-async function updateReadStats(clearFirst = false){
-  if(!SID) {
-    // If no session yet, show placeholder
-    const container = $('#read-stats');
-    if(container) {
-      container.innerHTML = '<span class="muted">No statistics available yet. Run pipeline steps to see read counts.</span>';
-    }
-    return;
+  function formatNumber(num){
+    if(num === null || num === undefined || Number.isNaN(num)) return '--';
+    if(num >= 1000000) return (num/1000000).toFixed(3).replace(/\.?0+$/, '') + 'M';
+    if(num >= 1000) return (num/1000).toFixed(1).replace(/\.0$/, '') + 'k';
+    return num.toString();
   }
-  const container = $('#read-stats');
-  if(!container) {
-    console.warn('read-stats container not found');
-    return;
+  function formatRunTimestamp(ts){
+    if(!ts) return '';
+    const d = new Date(ts * 1000);
+    if(Number.isNaN(d.getTime())) return '';
+    return d.toLocaleString();
   }
   
-  // Clear container if requested (e.g., at start of new pipeline run)
-  if(clearFirst) {
-    container.innerHTML = '<span class="muted">Running pipeline...</span>';
-    return;
+  async function updateReadStats(clearFirst = false){
+    const statsContainer = $('#read-stats');
+    const historyContainer = $('#run-history');
+    const pipelineContainer = $('#run-pipeline');
+    const artifactContainer = $('#run-artifacts');
+    if(!statsContainer){
+      console.warn('read-stats container not found');
+      return;
+    }
+  
+    if(clearFirst){
+      statsContainer.innerHTML = '<span class=\"muted\">Running pipeline...</span>';
+      if(pipelineContainer){
+        pipelineContainer.innerHTML = '<span class=\"muted\">Pipeline pending...</span>';
+      }
+      if(artifactContainer){
+        artifactContainer.innerHTML = '<span class=\"muted\">Results pending...</span>';
+      }
+      return;
+    }
+  
+    if(!SID){
+      statsContainer.innerHTML = '<span class=\"muted\">No statistics available yet. Run pipeline steps to see read counts.</span>';
+      if(historyContainer) historyContainer.innerHTML = '<span class=\"muted\">No runs yet.</span>';
+      if(pipelineContainer) pipelineContainer.innerHTML = '<span class=\"muted\">No pipeline captured yet.</span>';
+      if(artifactContainer) artifactContainer.innerHTML = '<span class=\"muted\">No results captured yet.</span>';
+      return;
+    }
+  
+    try{
+      const r = await fetch(`/session/${SID}/stats`);
+      if(!r.ok) throw new Error('Unable to fetch stats');
+      const data = await r.json();
+      RUN_HISTORY = Array.isArray(data.runs) ? data.runs : [];
+  
+      if(!RUN_HISTORY.length){
+        SELECTED_RUN_ID = null;
+        statsContainer.innerHTML = '<span class=\"muted\">No statistics available yet. Run pipeline steps to see read counts.</span>';
+        if(historyContainer) historyContainer.innerHTML = '<span class=\"muted\">No completed runs yet.</span>';
+        if(pipelineContainer) pipelineContainer.innerHTML = '<span class=\"muted\">No pipeline captured yet.</span>';
+        if(artifactContainer) artifactContainer.innerHTML = '<span class=\"muted\">No results captured yet.</span>';
+        return;
+      }
+  
+      const hasSelected = RUN_HISTORY.some(run => run.id === SELECTED_RUN_ID);
+      if(CURRENT_RUN_ID && RUN_HISTORY.some(run => run.id === CURRENT_RUN_ID)){
+        SELECTED_RUN_ID = CURRENT_RUN_ID;
+      } else if(!hasSelected){
+        SELECTED_RUN_ID = RUN_HISTORY[0].id;
+      }
+  
+    renderRunHistory();
+    renderSelectedRunStats();
+    renderSelectedRunPipeline();
+    renderSelectedRunArtifacts();
+    }catch(e){
+      const msg = e?.message || e.toString();
+      statsContainer.innerHTML = '<span class=\"muted\">Statistics unavailable: ' + esc(msg) + '</span>';
+      if(historyContainer) historyContainer.innerHTML = '<span class=\"muted\">History unavailable.</span>';
+      if(pipelineContainer) pipelineContainer.innerHTML = '<span class=\"muted\">Pipeline unavailable.</span>';
+      if(artifactContainer) artifactContainer.innerHTML = '<span class=\"muted\">Results unavailable.</span>';
+    }
   }
   
-  try{
-    const r = await fetch(`/session/${SID}/stats`);
-    if(!r.ok) {
-      console.error('Failed to fetch stats:', r.status, r.statusText);
-      container.innerHTML = '<span class="muted">Failed to load statistics</span>';
+  function renderRunHistory(){
+    const wrap = $('#run-history');
+    if(!wrap) return;
+  
+    if(!RUN_HISTORY.length){
+      wrap.innerHTML = '<span class=\"muted\">No runs yet.</span>';
       return;
     }
-    const data = await r.json();
-    console.log('Stats data received:', data);
-    
-    if(!data.steps || data.steps.length === 0){
-      container.innerHTML = '<span class="muted">No statistics available yet. Run pipeline steps to see read counts.</span>';
-      return;
-    }
-    
-    // Filter to only show steps from the current pipeline run
-    let filteredSteps = data.steps;
-    if(CURRENT_RUN_START_STEP !== null) {
-      filteredSteps = data.steps.filter(step => step.step_index >= CURRENT_RUN_START_STEP);
-      console.log('Filtered steps:', filteredSteps, 'from start step:', CURRENT_RUN_START_STEP);
-    }
-    
-    if(filteredSteps.length === 0){
-      container.innerHTML = '<span class="muted">No statistics available yet. Run pipeline steps to see read counts.</span>';
-      return;
-    }
-    
-    // Get initial reads from the first step of current run
-    const firstStep = filteredSteps[0];
-    // For SC units, try to get initial from first step's pass count if no input
-    let initialReads = firstStep?.input || firstStep?.total || data.initial_reads;
-    // If still no initial reads, use the first step's pass count as baseline
-    if(!initialReads && firstStep?.pass) {
-      initialReads = firstStep.pass;
-    }
-    console.log('Initial reads:', initialReads, 'from first step:', firstStep);
-    if(!initialReads){
-      container.innerHTML = '<span class="muted">Waiting for initial read count...</span>';
-      return;
-    }
-    
-    const chart = document.createElement('div');
-    chart.className = 'funnel-chart';
-    
-    // Calculate max width for funnel effect (100% for first bar)
-    const maxWidth = 100; // percentage
-    
-    // Add initial reads bar (Total reads)
-    if(initialReads){
-      const firstBar = document.createElement('div');
-      firstBar.className = 'funnel-bar initial';
-      firstBar.style.width = maxWidth + '%';
-      firstBar.innerHTML = `
-        <div class="funnel-bar-label">Total reads</div>
-        <div class="funnel-bar-value">${formatNumber(initialReads)}</div>
-        <div class="funnel-bar-percentage">100%</div>
+  
+    wrap.innerHTML = '';
+    RUN_HISTORY.forEach(run => {
+      const item = document.createElement('div');
+      item.className = 'run-history-item' + (run.id === SELECTED_RUN_ID ? ' active' : '');
+      item.tabIndex = 0;
+      const label = esc(run.label || 'Run');
+      const created = formatRunTimestamp(run.created);
+      const steps = (run.steps || []).length;
+      const hasInitial = run.initial_reads !== null && run.initial_reads !== undefined;
+      const reads = hasInitial ? `${formatNumber(run.initial_reads)} initial reads` : 'Reads pending';
+      const metaParts = [`${steps} step${steps === 1 ? '' : 's'}`];
+      if(created) metaParts.push(created);
+  
+      item.innerHTML = `
+        <div><strong>${label}</strong></div>
+        <small>${esc(metaParts.join(' * '))}</small>
+        <small>${esc(reads)}</small>
       `;
-      chart.appendChild(firstBar);
-      
-      if(filteredSteps.length > 0){
-        const sep = document.createElement('div');
-        sep.className = 'funnel-separator';
-        chart.appendChild(sep);
+  
+      item.addEventListener('click', () => {
+        if(SELECTED_RUN_ID === run.id) return;
+        SELECTED_RUN_ID = run.id;
+        renderRunHistory();
+        renderSelectedRunStats();
+        renderSelectedRunPipeline();
+        renderSelectedRunArtifacts();
+      });
+      item.addEventListener('keypress', e => {
+        if(e.key === 'Enter' || e.key === ' '){
+          e.preventDefault();
+          item.click();
+        }
+      });
+      wrap.appendChild(item);
+    });
+  }
+  
+function renderSelectedRunStats(){
+  const container = $('#read-stats');
+  if(!container) return;
+    if(!RUN_HISTORY.length){
+      container.innerHTML = '<span class=\"muted\">No statistics available.</span>';
+      return;
+    }
+  
+    const run = RUN_HISTORY.find(r => r.id === SELECTED_RUN_ID) || RUN_HISTORY[0];
+    const runPipeline = resolvePipeline(run);
+    const pipelineMap = new Map();
+    runPipeline.forEach((step, idx) => {
+      if(step.unitId){ pipelineMap.set(step.unitId, step.flowTitle || step.label || `Step ${idx+1}`); }
+    });
+    if(!run || !run.steps || run.steps.length === 0){
+      container.innerHTML = '<span class=\"muted\">No statistics recorded yet for this run.</span>';
+      return;
+    }
+  
+    let initialReads = run.initial_reads;
+    if((initialReads === null || initialReads === undefined) && run.steps[0]){
+      const first = run.steps[0];
+      if(first.input !== null && first.input !== undefined){
+        initialReads = first.input;
+      }else if(first.pass !== null && first.pass !== undefined){
+        initialReads = first.pass;
       }
     }
-    
-    // Add bars for each filtering step (showing passed reads)
-    filteredSteps.forEach((step, idx) => {
-      // Use pass count if available, otherwise use total
-      const passCount = step.pass !== null && step.pass !== undefined ? step.pass : (step.total || 0);
-      if(passCount === 0 && !step.pass) return; // Skip if no meaningful data
-      
+    if(initialReads === null || initialReads === undefined){
+      container.innerHTML = '<span class=\"muted\">Waiting for initial read count...</span>';
+      return;
+    }
+    const positiveInitial = initialReads > 0;
+  
+    const chart = document.createElement('div');
+    chart.className = 'funnel-chart';
+  
+    const firstBar = document.createElement('div');
+    firstBar.className = 'funnel-bar initial';
+    firstBar.style.width = '100%';
+    firstBar.innerHTML = `
+      <div class=\"funnel-bar-label\">Total reads</div>
+      <div class=\"funnel-bar-value\">${formatNumber(initialReads)}</div>
+      <div class=\"funnel-bar-percentage\">${positiveInitial ? '100%' : '0%'}</div>
+    `;
+    chart.appendChild(firstBar);
+  
+    if(run.steps.length){
+      const sep = document.createElement('div');
+      sep.className = 'funnel-separator';
+      chart.appendChild(sep);
+    }
+  
+    run.steps.forEach((step, idx) => {
+      const passCount = (step.pass !== null && step.pass !== undefined) ? step.pass : null;
+      if(passCount === null || passCount === undefined) return;
+  
       const bar = document.createElement('div');
       bar.className = 'funnel-bar filter';
-      const percentage = initialReads ? Math.round((passCount / initialReads) * 100) : 0;
-      
-      // Calculate width as percentage of initial reads to create funnel effect
-      const widthPercent = initialReads ? Math.max(15, (passCount / initialReads) * 100) : 15;
+      const percentage = positiveInitial ? Math.round((passCount / initialReads) * 100) : (passCount > 0 ? 100 : 0);
+      const widthPercent = positiveInitial ? Math.max(15, (passCount / initialReads) * 100) : 15;
       bar.style.width = widthPercent + '%';
-      
-      // Shorten label if too long
-      let label = esc(step.label || step.unit);
-      if(label.length > 30) label = label.substring(0, 27) + '...';
-      
+  
+    let label = cleanLabel(step.label || step.unit);
+    const pipelineLabel = pipelineMap.get(step.unit);
+    if(pipelineLabel){
+      label = cleanLabel(pipelineLabel);
+    } else if(idx < runPipeline.length){
+      label = cleanLabel(runPipeline[idx].flowTitle || runPipeline[idx].label || label);
+    }
+    if(label.length > 30) label = label.slice(0, 27) + '...';
+
       bar.innerHTML = `
-        <div class="funnel-bar-label">${label}</div>
-        <div class="funnel-bar-value">passed ${formatNumber(passCount)}</div>
-        <div class="funnel-bar-percentage">${percentage}%</div>
+        <div class=\"funnel-bar-label\">${esc(label)}</div>
+        <div class=\"funnel-bar-value\">passed ${formatNumber(passCount)}</div>
+        <div class=\"funnel-bar-percentage\">${percentage}%</div>
       `;
       chart.appendChild(bar);
-      
-      // Add separator between steps (except after last)
-      if(idx < filteredSteps.length - 1){
+  
+      if(idx < run.steps.length - 1){
         const sep = document.createElement('div');
         sep.className = 'funnel-separator';
         chart.appendChild(sep);
       }
     });
-    
-    container.innerHTML = '';
-    container.appendChild(chart);
-    console.log('Statistics chart rendered successfully');
-  }catch(e){
-    console.error('Failed to update read stats:', e);
-    container.innerHTML = '<span class="muted">Statistics unavailable: ' + esc(e.message) + '</span>';
-  }
+  
+    const meta = document.createElement('div');
+    meta.className = 'run-stats-meta';
+    const created = formatRunTimestamp(run.created);
+    const metaParts = [`${(run.steps || []).length} step${run.steps.length === 1 ? '' : 's'}`];
+    if(created) metaParts.push(created);
+    meta.innerHTML = `
+      <strong>${esc(run.label || 'Run')}</strong>
+      <span>${esc(metaParts.join(' * '))}</span>
+    `;
+  
+  container.innerHTML = '';
+  container.appendChild(meta);
+  container.appendChild(chart);
 }
 
+function resolvePipeline(run){
+  if(!run) return [];
+  if(Array.isArray(run.pipeline) && run.pipeline.length){
+    return run.pipeline;
+  }
+  const steps = run.steps || [];
+  return steps.map((step, idx) => ({
+    unitId: step.unit,
+    label: cleanLabel(step.label || step.unit || `Step ${idx+1}`),
+    flowTitle: cleanLabel(step.label || step.unit || `Step ${idx+1}`),
+    params: {},
+  }));
+}
+
+function renderSelectedRunPipeline(){
+  if(!RUN_HISTORY.length){
+    hydrateFlowFromPipeline([]);
+    const container = $('#run-pipeline');
+    if(container){
+      container.innerHTML = '<span class="muted">No runs yet.</span>';
+    }
+    return;
+  }
+  const run = RUN_HISTORY.find(r => r.id === SELECTED_RUN_ID) || RUN_HISTORY[0];
+  const pipeline = resolvePipeline(run);
+  hydrateFlowFromPipeline(pipeline);
+  const container = $('#run-pipeline');
+  if(!container){
+    return;
+  }
+  if(!pipeline.length){
+    container.innerHTML = '<span class="muted">Pipeline not captured for this run.</span>';
+    return;
+  }
+  container.innerHTML = '';
+  pipeline.forEach((step, idx) => {
+    const item = document.createElement('div');
+    item.className = 'pipeline-step';
+    const label = step.flowTitle || step.label || step.unitId || `Step ${idx+1}`;
+    const unitId = step.unitId || '';
+    item.innerHTML = `
+      <span class="pipeline-index">${idx+1}</span>
+      <div class="pipeline-info">
+        <div class="pipeline-label">${esc(label)}</div>
+        <div class="pipeline-unit">${esc(unitId)}</div>
+      </div>
+    `;
+    container.appendChild(item);
+  });
+}
+
+function renderSelectedRunArtifacts(){
+  const container = $('#run-artifacts');
+  if(!container){
+    return;
+  }
+  if(!RUN_HISTORY.length){
+    container.innerHTML = '<span class="muted">No runs yet.</span>';
+    return;
+  }
+  const run = RUN_HISTORY.find(r => r.id === SELECTED_RUN_ID) || RUN_HISTORY[0];
+  const artifacts = Array.isArray(run?.artifacts) ? run.artifacts : [];
+  if(!artifacts.length){
+    container.innerHTML = '<span class="muted">No results captured for this run.</span>';
+    return;
+  }
+  container.innerHTML = '';
+  artifacts.forEach(art => {
+    const item = document.createElement('div');
+    item.className = 'artifact-item';
+    const label = cleanLabel(art.label || art.name);
+    const url = `/session/${SID}/download/${encodeURIComponent(art.name)}`;
+    item.innerHTML = `
+      <div class="artifact-info">
+        <div class="artifact-label">${esc(label)}</div>
+        <div class="artifact-meta">${esc(art.kind || '')}</div>
+      </div>
+      <a href="${url}" target="_blank" rel="noopener">download</a>
+    `;
+    container.appendChild(item);
+  });
+}
 // ----- Init -----
 document.addEventListener('DOMContentLoaded', async () => {
   // wire buttons
@@ -537,9 +790,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('#unit-search').addEventListener('input', applySearch);
   $('#expAll').addEventListener('click', expandAll);
   $('#colAll').addEventListener('click', collapseAll);
+  const logToggle = $('#log-toggle');
+  if(logToggle) logToggle.addEventListener('click', toggleLog);
+  setLogExpanded(false);
 
   await ensureSession();
   await renderUnits();
   applySearch(); // initialize
   await updateReadStats(); // Initialize read statistics display
 });
+
+
+

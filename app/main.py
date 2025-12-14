@@ -1,12 +1,12 @@
 # app/main.py
-import os, json, uuid, gzip, pathlib, shutil, subprocess
+import os, json, uuid, gzip, pathlib, shutil, subprocess, time, copy, csv
 from typing import Optional, Dict, List, Literal, Any
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # --------- sanity: ensure pRESTO tools exist on PATH ----------
 import shutil as _shutil
@@ -51,6 +51,13 @@ class StepResult(BaseModel):
     unit: str
     params: Dict[str, Any]
     produced: List[Artifact]
+    run_id: Optional[str] = None
+
+class RunInfo(BaseModel):
+    id: str
+    label: Optional[str] = None
+    created: float
+    pipeline: List[Dict[str, Any]] = Field(default_factory=list)
 
 class SessionState(BaseModel):
     session_id: str
@@ -58,6 +65,7 @@ class SessionState(BaseModel):
     artifacts: Dict[str, Artifact] = {}
     current: Dict[str, str] = {}     # channel -> artifact-name
     aux: Dict[str, str] = {}         # e.g. {"v_primers": "Greiff2014_VPrimers.fasta"}
+    run_history: Dict[str, RunInfo] = {}
     
 def _ensure_uncompressed_path(path: pathlib.Path, dest: pathlib.Path) -> pathlib.Path:
     """If `path` endswith .gz, decompress to `dest` (overwrite) and return dest; else return path."""
@@ -174,6 +182,87 @@ def _peek_first_nonempty_char(path: pathlib.Path, gz: bool) -> str:
 
 def make_canonical_name(channel: str, kind: str) -> str:
     return f"{channel}.fastq" if kind == "fastq" else f"{channel}.fasta"
+
+def _history_csv_path(sess_dir: pathlib.Path) -> pathlib.Path:
+    return sess_dir / "run_history.csv"
+
+def _read_history_rows(sess_dir: pathlib.Path) -> Dict[str, Dict[str, Any]]:
+    path = _history_csv_path(sess_dir)
+    rows: Dict[str, Dict[str, Any]] = {}
+    if not path.exists():
+        return rows
+    with path.open("r", encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            run_id = row.get("run_id")
+            if not run_id:
+                continue
+            try:
+                pipeline = json.loads(row.get("pipeline") or "[]")
+            except Exception:
+                pipeline = []
+            try:
+                stats = json.loads(row.get("stats") or "[]")
+            except Exception:
+                stats = []
+            try:
+                artifacts = json.loads(row.get("artifacts") or "[]")
+            except Exception:
+                artifacts = []
+            try:
+                initial_reads = json.loads(row.get("initial_reads") or "null")
+            except Exception:
+                initial_reads = None
+            try:
+                created = float(row.get("created") or 0)
+            except Exception:
+                created = 0
+            rows[run_id] = {
+                "id": run_id,
+                "label": row.get("label") or run_id,
+                "created": created,
+                "pipeline": pipeline,
+                "steps": stats,
+                "artifacts": artifacts,
+                "initial_reads": initial_reads,
+            }
+    return rows
+
+def _write_history_rows(sess_dir: pathlib.Path, rows: Dict[str, Dict[str, Any]]):
+    path = _history_csv_path(sess_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        fieldnames = ["run_id","label","created","pipeline","stats","artifacts","initial_reads"]
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        for run_id in sorted(rows.keys(), key=lambda k: rows[k].get("created", 0)):
+            data = rows[run_id]
+            writer.writerow({
+                "run_id": run_id,
+                "label": data.get("label") or run_id,
+                "created": data.get("created") or 0,
+                "pipeline": json.dumps(data.get("pipeline") or []),
+                "stats": json.dumps(data.get("steps") or []),
+                "artifacts": json.dumps(data.get("artifacts") or []),
+                "initial_reads": json.dumps(data.get("initial_reads")),
+            })
+
+def _sc_default_inputs(sess: SessionState, sess_dir: pathlib.Path) -> Optional[List[str]]:
+    """
+    Return a list containing the most recent SC_TABLE artifact path (relative),
+    if available and present on disk. Otherwise return None so callers can fall
+    back to listing *.tsv files.
+    """
+    key = sess.current.get("SC_TABLE")
+    if not key:
+        return None
+    art = sess.artifacts.get(key)
+    if not art:
+        return None
+    path = sess_dir / art.path
+    if not path.exists():
+        return None
+    return [art.path]
 
 def _save_upload_canonical(upload: UploadFile, channel: str, sdir: pathlib.Path) -> Artifact:
     """
@@ -645,6 +734,7 @@ class U_MergeSamples(UnitSpec):
             lst <- lapply(files, read_one)
             merged <- do.call(rbind, lst)
             write.table(merged, file=out, sep="\\t", quote=FALSE, row.names=FALSE)
+            cat(paste("Wrote", out, "rows:", nrow(merged), "\\n"))
         """
         rfile.write_text(r_code, encoding="utf-8")
 
@@ -692,7 +782,8 @@ class U_SC_FilterProductive(UnitSpec):
         if files_param:
             names = [n for n in re.split(r"[,\s]+", files_param) if n]
         else:
-            names = sorted([p.name for p in sess_dir.glob("*.tsv")] +
+            names = _sc_default_inputs(sess, sess_dir) or \
+                    sorted([p.name for p in sess_dir.glob("*.tsv")] +
                            [p.name for p in sess_dir.glob("*.tsv.gz")])
 
         if not names:
@@ -846,7 +937,8 @@ class U_SC_RemoveMultiHeavy(UnitSpec):
         if files_param:
             names = [n for n in re.split(r"[,\s]+", files_param) if n]
         else:
-            names = sorted([p.name for p in sess_dir.glob("*.tsv")] +
+            names = _sc_default_inputs(sess, sess_dir) or \
+                    sorted([p.name for p in sess_dir.glob("*.tsv")] +
                            [p.name for p in sess_dir.glob("*.tsv.gz")])
         if not names:
             raise HTTPException(400, "No TSVs found. Upload TSV/TSV.GZ or provide 'files'.")
@@ -1001,7 +1093,8 @@ class U_SC_RemoveNoHeavy(UnitSpec):
         if files_param:
             names = [n for n in re.split(r"[,\s]+", files_param) if n]
         else:
-            names = sorted([p.name for p in sess_dir.glob("*.tsv")] +
+            names = _sc_default_inputs(sess, sess_dir) or \
+                    sorted([p.name for p in sess_dir.glob("*.tsv")] +
                            [p.name for p in sess_dir.glob("*.tsv.gz")])
         if not names:
             raise HTTPException(400, "No TSVs found. Upload TSV/TSV.GZ or provide 'files'.")
@@ -1288,6 +1381,13 @@ UNITS: Dict[str, UnitSpec] = {
 class RunBody(BaseModel):
     unit_id: str
     params: Dict[str, Any] = {}
+    run_id: Optional[str] = None
+
+class RunStartBody(BaseModel):
+    run_id: str
+    label: Optional[str] = None
+    reset_sc_table: bool = False
+    pipeline: Optional[List[Dict[str, Any]]] = None
 
 @app.post("/session/start")
 def start_session():
@@ -1296,6 +1396,33 @@ def start_session():
     sdir.mkdir(parents=True, exist_ok=True)
     save_state(sdir, SessionState(session_id=sid))
     return {"session_id": sid}
+
+@app.post("/session/{sid}/run/start")
+def start_pipeline_run(sid: str, body: RunStartBody = Body(...)):
+    if not body.run_id:
+        raise HTTPException(400, "run_id is required")
+    sdir = BASE / sid
+    sess = load_state(sdir)
+    pipeline_payload: List[Dict[str, Any]] = []
+    if body.pipeline:
+        pipeline_payload = copy.deepcopy(body.pipeline)
+    info = RunInfo(id=body.run_id, label=body.label or body.run_id, created=time.time(), pipeline=pipeline_payload)
+    sess.run_history[body.run_id] = info
+    if body.reset_sc_table:
+        sess.current.pop("SC_TABLE", None)
+    save_state(sdir, sess)
+    history_rows = _read_history_rows(sdir)
+    history_rows[body.run_id] = {
+        "id": body.run_id,
+        "label": info.label,
+        "created": info.created,
+        "pipeline": pipeline_payload,
+        "steps": [],
+        "artifacts": [],
+        "initial_reads": None,
+    }
+    _write_history_rows(sdir, history_rows)
+    return info.model_dump()
 
 @app.get("/session/{sid}/units")
 def list_units(sid: str):
@@ -1365,6 +1492,10 @@ def run_unit(sid: str, body: RunBody = Body(...)):
     step_idx = len(sess.steps)
     try:
         step = unit.run(sess, sdir, body.params)
+        if body.run_id:
+            if body.run_id not in sess.run_history:
+                sess.run_history[body.run_id] = RunInfo(id=body.run_id, label=body.run_id, created=time.time())
+            step.run_id = body.run_id
         sess.steps.append(step)
         save_state(sdir, sess)
         return {"step": step.model_dump(), "current": sess.current, "artifacts": {k:v.model_dump() for k,v in sess.artifacts.items()}}
@@ -1403,87 +1534,120 @@ def get_log(sid: str, step_index: int):
 
 @app.get("/session/{sid}/stats")
 def get_pipeline_stats(sid: str):
-    """Parse PASS/FAIL statistics from all executed steps in the pipeline."""
+    """Parse PASS/FAIL statistics grouped by pipeline runs, persisted to CSV."""
     import re
     sdir = BASE / sid
-    s = load_state(sdir)
-    
-    stats = []
-    initial_reads = None
-    
-    # Get all executed steps in order
-    if not hasattr(s, 'steps') or not s.steps:
-        return {"steps": [], "initial_reads": None}
-    
-    for step in sorted(s.steps, key=lambda x: x.step_index):
+    csv_rows = _read_history_rows(sdir)
+    sess = load_state(sdir)
+    if not getattr(sess, "steps", None):
+        runs_list = sorted(csv_rows.values(), key=lambda r: r.get("created", 0), reverse=True)
+        return {"runs": runs_list}
+
+    runs: Dict[str, Dict[str, Any]] = {}
+    for step in sorted(sess.steps, key=lambda x: x.step_index):
         step_idx = step.step_index
         prefix = f"{step_idx:03d}_"
         logs = sorted([p for p in sdir.iterdir() if p.name.startswith(prefix) and p.suffix == ".log"])
-        
         if not logs:
             continue
-            
-        # Read log content
+
         log_content = ""
         for log_file in logs:
             try:
                 log_content += log_file.read_text(errors="ignore") + "\n"
-            except:
+            except Exception:
                 pass
-        
-        # Parse PASS/FAIL from log (for bulk FilterSeq units)
-        # Pattern: "PASS> 23124" or "SEQUENCES> 23124" or "OUTPUT> R1_m10_missing-pass.fastq"
+
         pass_match = re.search(r'PASS>\s*(\d+)', log_content, re.IGNORECASE)
         fail_match = re.search(r'FAIL>\s*(\d+)', log_content, re.IGNORECASE)
         seq_match = re.search(r'SEQUENCES>\s*(\d+)', log_content, re.IGNORECASE)
-        
-        # Parse row counts from log (for single-cell units)
-        # Pattern: "Wrote SC_productive.tsv rows: 12345" or "rows: 12345"
         rows_match = re.search(r'rows:\s*(\d+)', log_content, re.IGNORECASE)
-        
-        pass_count = None
-        fail_count = None
-        input_count = None  # SEQUENCES is the input count
-        row_count = None  # For single-cell units
-        
-        if pass_match:
-            pass_count = int(pass_match.group(1))
-        if fail_match:
-            fail_count = int(fail_match.group(1))
-        if seq_match:
-            input_count = int(seq_match.group(1))
-        if rows_match:
-            row_count = int(rows_match.group(1))
-        
-        # For single-cell units, use row_count as pass_count
+
+        pass_count = int(pass_match.group(1)) if pass_match else None
+        fail_count = int(fail_match.group(1)) if fail_match else None
+        input_count = int(seq_match.group(1)) if seq_match else None
+        row_count = int(rows_match.group(1)) if rows_match else None
         if row_count is not None and pass_count is None:
             pass_count = row_count
-        
-        # Get initial reads from first step's input (SEQUENCES for bulk, or first row count for SC)
-        # For the first step, use its input if available, otherwise use its output as baseline
-        if initial_reads is None:
-            if input_count is not None:
-                initial_reads = input_count
-            elif row_count is not None:
-                initial_reads = row_count
-            elif pass_count is not None:
-                # Fallback: if we only have pass count on first step, use it as initial estimate
-                initial_reads = pass_count
-        
-        # Only add stats if we have meaningful data (pass count for filtering steps, or row count for SC)
-        if pass_count is not None or row_count is not None:
-            unit_obj = UNITS.get(step.unit)
-            label = unit_obj.label if unit_obj else step.unit
-            # Use pass_count (which may be from row_count for SC units)
-            final_pass = pass_count if pass_count is not None else row_count
-            stats.append({
-                "step_index": step_idx,
+
+        run_id = step.run_id or "__adhoc__"
+        info = sess.run_history.get(run_id)
+        run_entry = runs.setdefault(run_id, {
+            "id": run_id,
+            "label": (info.label if info else ("Ad-hoc" if run_id == "__adhoc__" else run_id)),
+            "created": info.created if info else 0,
+            "steps": [],
+            "initial_reads": None,
+            "pipeline": copy.deepcopy(info.pipeline) if info and info.pipeline else [],
+            "artifacts": [],
+        })
+
+        unit_obj = UNITS.get(step.unit)
+        label = unit_obj.label if unit_obj else step.unit
+
+        produced_meta = []
+        for art in getattr(step, "produced", []):
+            produced_meta.append({
+                "name": art.name,
+                "kind": art.kind,
+                "channel": art.channel,
                 "unit": step.unit,
                 "label": label,
-                "pass": final_pass,
-                "fail": fail_count,
-                "input": input_count if input_count else (row_count if row_count and step_idx == 0 else None),  # Input count for this step
-                "percentage": round((final_pass / initial_reads * 100), 1) if (final_pass is not None and initial_reads) else None
+                "step_index": step_idx,
             })
-    
-    return {"steps": stats, "initial_reads": initial_reads}
+        if produced_meta:
+            run_entry["artifacts"].extend(produced_meta)
+
+        if pass_count is None and row_count is None:
+            continue
+
+        final_pass = pass_count if pass_count is not None else row_count
+        if run_entry["initial_reads"] is None:
+            if input_count is not None:
+                run_entry["initial_reads"] = input_count
+            elif row_count is not None:
+                run_entry["initial_reads"] = row_count
+            elif pass_count is not None:
+                run_entry["initial_reads"] = pass_count
+        if run_entry["initial_reads"] is None and final_pass is not None:
+            run_entry["initial_reads"] = final_pass
+
+        initial_reads = run_entry["initial_reads"]
+        valid_denominator = initial_reads not in (None, 0)
+        percentage = round((final_pass / initial_reads * 100), 1) if (final_pass is not None and valid_denominator) else None
+        run_entry["steps"].append({
+            "step_index": step_idx,
+            "unit": step.unit,
+            "label": label,
+            "pass": final_pass,
+            "fail": fail_count,
+            "input": input_count if input_count is not None else (row_count if (row_count is not None and len(run_entry["steps"]) == 0) else None),
+            "percentage": percentage,
+        })
+
+    for run_id, data in runs.items():
+        existing = csv_rows.get(run_id, {
+            "id": run_id,
+            "label": data.get("label") or run_id,
+            "created": data.get("created", 0),
+            "pipeline": data.get("pipeline", []),
+            "steps": [],
+            "artifacts": [],
+            "initial_reads": None,
+        })
+        if not existing.get("pipeline"):
+            existing["pipeline"] = data.get("pipeline") or []
+        existing["label"] = data.get("label") or existing.get("label") or run_id
+        if not existing.get("created"):
+            existing["created"] = data.get("created", 0)
+        if data.get("steps"):
+            existing["steps"] = data.get("steps", [])
+        if data.get("initial_reads") is not None:
+            existing["initial_reads"] = data.get("initial_reads")
+        if data.get("artifacts"):
+            existing["artifacts"] = data.get("artifacts")
+        csv_rows[run_id] = existing
+
+    _write_history_rows(sdir, csv_rows)
+    runs_list = sorted(csv_rows.values(), key=lambda r: r.get("created", 0), reverse=True)
+    return {"runs": runs_list}

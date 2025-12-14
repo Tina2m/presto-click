@@ -7,11 +7,11 @@
   <title>Single‑Cell AIRR · ImmunoStream</title>
 
   <!-- Shared nav -->
-  <link rel="stylesheet" href="assets/css/nav.css?v=20250306">
-  <script src="assets/js/nav.js?v=20250306" defer></script>
+  <link rel="stylesheet" href="assets/css/nav.css?v=20250312">
+  <script src="assets/js/nav.js?v=20250312" defer></script>
 
   <!-- Page styles -->
-  <link rel="stylesheet" href="assets/css/sc.css?v=20250306">
+  <link rel="stylesheet" href="assets/css/sc.css?v=20250320">
 </head>
 <body>
   <!-- nav.js injects the header here -->
@@ -42,8 +42,8 @@
             <h2 id="units">Units</h2>
             <div class="grow"></div>
             <input id="unit-search" placeholder="Search units or parameters…" aria-label="Search units">
-            <button id="expAll" class="secondary">Expand all</button>
-            <button id="colAll" class="secondary">Collapse all</button>
+            <button id="expAll" class="secondary">Expand</button>
+            <button id="colAll" class="secondary">Collapse</button>
           </div>
 
           <div id="groups" class="groups">
@@ -57,15 +57,13 @@
         </section>
 
         <section aria-labelledby="lastlog">
-          <h2 id="lastlog">Last step log</h2>
-          <div id="log" class="mb8" style="max-height:500px;overflow-y:auto;background:#f9fafb;border:1px solid var(--border);border-radius:10px;padding:10px;font-family:monospace;font-size:12px;line-height:1.5"></div>
-          <div id="log" class="mb8" style="max-height:500px;overflow-y:auto;background:#f9fafb;border:1px solid var(--border);border-radius:10px;padding:10px;font-family:monospace;font-size:12px;line-height:1.5"></div>
+          <div class="section-head">
+            <h2 id="lastlog">Last step log</h2>
+            <button id="log-toggle" class="secondary btn-small" type="button">Expand</button>
+          </div>
+          <div id="log" class="mb8 collapsed" style="max-height:500px;overflow-y:auto;background:#f9fafb;border:1px solid var(--border);border-radius:10px;padding:10px;font-family:monospace;font-size:12px;line-height:1.5"></div>
         </section>
 
-        <section aria-labelledby="arts">
-          <h2 id="arts-h">Artifacts</h2>
-          <div id="arts"></div>
-        </section>
       </div>
     </main>
 
@@ -94,19 +92,23 @@
           <h3>Notes</h3>
           <div class="muted">Use "Add to flow" on any card to build a pipeline. Order is preserved by your clicks. Units here are independent and operate on uploaded TSVs.</div>
         </div>
-        <div class="mt8">
-          <h3>Read statistics</h3>
-          <div id="read-stats" class="read-stats-container"></div>
-          <div class="muted">Use "Add to flow" on any card to build a pipeline. Order is preserved by your clicks. Units here are independent and operate on uploaded TSVs.</div>
-        </div>
-        <div class="mt8">
-          <h3>Read statistics</h3>
-          <div id="read-stats" class="read-stats-container"></div>
-        </div>
+        <div class="mt8 stats-columns">
+          <div class="stats-main">
+            <h3>Read statistics</h3>
+            <div id="read-stats" class="read-stats-container"></div>
+            <div class="muted" style="font-size:12px">Use "Add to flow" on any card to build a pipeline. Order is preserved by your clicks. Units here are independent and operate on uploaded TSVs.</div>
+          </div>
+          <aside class="history-panel">
+            <h3>Run history</h3>
+            <div id="run-history" class="run-history"></div>
+            <h4>Results</h4>
+            <div id="run-artifacts" class="run-artifacts"></div>
+            </aside>
+          </div>
       </div>
     </aside>
   </div>
 
-  <script type="module" src="assets/js/sc.js?v=20250306"></script>
+  <script type="module" src="assets/js/sc.js?v=20250320"></script>
 </body>
 </html>
