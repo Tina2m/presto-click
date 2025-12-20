@@ -13,6 +13,26 @@ let CURRENT_RUN_ID = null;
 const $  = sel => document.querySelector(sel);
 const $$ = sel => document.querySelectorAll(sel);
 const esc = s => (s??'').toString().replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function setRunStatus(text){
+  const el = $('#run-status');
+  if(el) el.innerHTML = text || '—';
+}
+function setRunProgress(current, total){
+  const bar = $('#run-bar');
+  if(!bar){
+    return;
+  }
+  if(!total || total <= 0){
+    bar.style.width = '0%';
+    bar.setAttribute('aria-valuenow', '0');
+    bar.setAttribute('aria-valuemax', '100');
+    return;
+  }
+  const pct = Math.max(0, Math.min(100, (current / total) * 100));
+  bar.style.width = `${pct}%`;
+  bar.setAttribute('aria-valuenow', pct.toFixed(1));
+  bar.setAttribute('aria-valuemax', '100');
+}
 const FLOW_LABELS = {
   sc_merge_samples: 'Merge Samples',
   sc_filter_productive: 'Keep Productive Seqs',
@@ -216,11 +236,17 @@ async function runSingle(card, unitId, label){
     btn.dataset.originalText = btn.textContent;
     btn.textContent = 'Running…';
   }
+  setRunStatus(`Running ${label}`);
+  setRunProgress(0,1);
   try{
     await updateReadStats(true);
     const ok = await runUnit({unitId, label, params}, null);
     if(ok){
-      $('#pstate').textContent = `Ran ${label}`;
+      setRunStatus(`Finished ${label}`);
+      setRunProgress(1,1);
+    } else {
+      setRunStatus(`Failed ${label}`);
+      setRunProgress(0,1);
     }
   }finally{
     if(btn) btn.disabled = false;
@@ -361,20 +387,25 @@ async function runFlow(){
   $('#validate').disabled = true;
   $('#clearflow').disabled = true;
   
-  $('#pstate').textContent = `starting (${FLOW.length} steps)…`;
+  setRunStatus(`Starting run with ${FLOW.length} steps…`);
+  setRunProgress(0, FLOW.length || 1);
   for(let i=0;i<FLOW.length;i++){
     if(STOP_REQUESTED){
-      $('#pstate').textContent = `stopped at step ${i}/${FLOW.length}`;
+      setRunStatus(`Stopped at step ${i}/${FLOW.length}`);
+      setRunProgress(i, FLOW.length || 1);
       break;
     }
     
     const s = FLOW[i];
-    $('#pstate').textContent = `running step ${i+1}/${FLOW.length}: ${s.label}`;
+    setRunStatus(`Running ${s.label} (${i+1}/${FLOW.length})`);
+    setRunProgress(i, FLOW.length || 1);
     const ok = await runUnit(s, runId);
     if(!ok){
-      $('#pstate').textContent = `failed at step ${i+1}: ${s.label}`;
+      setRunStatus(`Failed at ${s.label}`);
+      setRunProgress(i, FLOW.length || 1);
       break;
     }
+    setRunProgress(i+1, FLOW.length || 1);
   }
   
   const wasStopped = STOP_REQUESTED;
@@ -387,7 +418,8 @@ async function runFlow(){
   $('#clearflow').disabled = false;
   
   if(!wasStopped){
-    $('#pstate').textContent = 'finished ✓';
+    setRunStatus('Finished ✓');
+    setRunProgress(FLOW.length || 1, FLOW.length || 1);
   }
   await updateReadStats(); // Final update of statistics
   CURRENT_RUN_ID = null;
@@ -396,7 +428,7 @@ async function runFlow(){
 function stopFlow(){
   if(!running) return;
   STOP_REQUESTED = true;
-  $('#pstate').textContent = 'stopping…';
+  setRunStatus('Stopping…');
 }
 
 async function runUnit(step, runId = null){
@@ -778,7 +810,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     FLOW=[]; 
     renderFlow(); 
     $('#validation').textContent='—'; 
-    $('#pstate').textContent='idle';
+    setRunStatus('idle');
+    setRunProgress(0,1);
     // Clear accumulated logs
     const logEl = $('#log');
     if(logEl) logEl.innerHTML = '';
@@ -794,6 +827,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   if(logToggle) logToggle.addEventListener('click', toggleLog);
   setLogExpanded(false);
 
+  setRunStatus('idle');
+  setRunProgress(0,1);
   await ensureSession();
   await renderUnits();
   applySearch(); // initialize
