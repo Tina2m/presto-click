@@ -911,21 +911,16 @@ class U_SC_RemoveMultiHeavy(UnitSpec):
     locus_field : text
         Column that denotes chain locus (default: 'locus').
     heavy_value : text
-        Value that denotes the heavy locus (default: 'IGH').
+        Value(s) that denote the heavy locus (default: 'IGH'). Use 'TRA'/'TRB' for TCR
+        datasets, or provide comma/space-separated values (e.g., 'TRA, TRB') to screen both.
     cell_field : text
-        Column with the cell identifier (default: 'cell_id')  — REQUIRED in input.
-    fallback_from_vcall : select {'true','false'}
-        If `locus_field` is missing, detect heavy with grepl('^IGH', v_call) (default true).
-    mode : select {'merge','per_file'}
-        'merge' → one file SC_no_multi_heavy.tsv; 'per_file' → one file per input.
-        In both cases SC_TABLE is set (first produced when per_file).
-    sample_field : text
-        When merging and non-empty, annotate each row with the filename stem.
+        Column with the cell identifier (default: 'cell_id') -- REQUIRED in input.
+        If `locus_field` is missing, heavy chains are inferred automatically via v_call using
+        the selected heavy locus prefix (IGH/TRA/TRB).
 
     Output
     ------
-    - merge: SC_no_multi_heavy.tsv
-    - per_file: SC_noMH_<basename>.tsv per input
+    - SC_no_multi_heavy.tsv
     """
     def run(self, sess, sess_dir, params):
         import re
@@ -948,32 +943,35 @@ class U_SC_RemoveMultiHeavy(UnitSpec):
                 raise HTTPException(400, f"File not found in session: {n}")
 
         locus_field = (params.get("locus_field") or "locus").strip() or "locus"
-        heavy_value = (params.get("heavy_value") or "IGH").strip() or "IGH"
+        heavy_value_raw = (params.get("heavy_value") or "IGH").strip()
+        heavy_values = [v.upper() for v in re.split(r"[,\s]+", heavy_value_raw) if v]
+        if not heavy_values:
+            heavy_values = ["IGH"]
         cell_field  = (params.get("cell_field")  or "cell_id").strip() or "cell_id"
-        fb          = str(params.get("fallback_from_vcall", "true")).lower() in ("1","true","yes","y")
-        mode        = (params.get("mode") or "merge").strip().lower()
-        if mode not in ("merge","per_file"):
-            mode = "merge"
-        sfield      = (params.get("sample_field") or "sample_id").strip()
 
         # ---- R script ----
         rfile = sess_dir / f"{idx:03d}_sc_remove_multi_heavy.R"
         out_merged = "SC_no_multi_heavy.tsv"
-        # pass: out_merged, mode, sfield, locus_field, heavy_value, cell_field, fallbackFlag, then files...
+        # pass: out_merged, heavy_values, then files...
         r_code = f"""
 args <- commandArgs(trailingOnly=TRUE)
+if (length(args) < 2) {{
+  stop("Usage: Rscript sc_remove_multi_heavy.R <out.tsv> <heavy_values> <files...>")
+}}
 out_merged <- args[1]
-mode <- args[2]
-sfield <- args[3]
 locus_field <- {repr(locus_field)}
-heavy_value <- {repr(heavy_value)}
 cell_field <- {repr(cell_field)}
-fallbackFlag <- as.logical({str(fb).upper()})
-files <- args[-(1:3)]
+fallbackFlag <- TRUE
+heavy_values <- unique(toupper(unlist(strsplit(args[2], ","))))
+heavy_values <- heavy_values[nchar(heavy_values) > 0]
+if (length(heavy_values) == 0) {{
+  heavy_values <- c("IGH")
+}}
+files <- args[-(1:2)]
 
 read_one <- function(f){{
   df <- tryCatch({{
-    read.delim(f, header=TRUE, sep="\\t", check.names=FALSE, stringsAsFactors=FALSE)
+    read.delim(f, header=TRUE, sep="\t", check.names=FALSE, stringsAsFactors=FALSE)
   }}, error=function(e) {{
     stop(paste("Failed to read:", f, "->", e$message))
   }})
@@ -981,79 +979,57 @@ read_one <- function(f){{
     stop(paste("Column", cell_field, "not found in", f))
   }}
 
-  # Identify heavy chains
-  if (locus_field %in% colnames(df)) {{
-    heavy_mask <- (df[[locus_field]] == heavy_value)
-  }} else if (fallbackFlag && ("v_call" %in% colnames(df))) {{
-    heavy_mask <- grepl("^IGH", as.character(df[["v_call"]]))
-  }} else {{
-    warning(paste("No", locus_field, "and no v_call; assuming no heavy calls in", f))
-    heavy_mask <- rep(FALSE, nrow(df))
+  multi_cells <- character(0)
+  for (hv in heavy_values) {{
+    hv_trim <- trimws(hv)
+    if (nchar(hv_trim) == 0) {{
+      next
+    }}
+    mask <- rep(FALSE, nrow(df))
+    if (locus_field %in% colnames(df)) {{
+      mask <- toupper(df[[locus_field]]) == hv_trim
+    }} else if (fallbackFlag && ("v_call" %in% colnames(df))) {{
+      pattern <- paste0("^", hv_trim)
+      mask <- grepl(pattern, toupper(as.character(df[["v_call"]])))
+    }} else {{
+      warning(paste("No", locus_field, "and no v_call; cannot classify heavy locus", hv_trim, "in", f))
+      next
+    }}
+    hv_cells <- df[mask, cell_field]
+    hv_cells <- hv_cells[!is.na(hv_cells) & hv_cells != ""]
+    if (length(hv_cells) == 0) {{
+      next
+    }}
+    tab <- table(hv_cells)
+    hv_multi <- names(tab[tab > 1])
+    if (length(hv_multi) > 0) {{
+      multi_cells <- union(multi_cells, hv_multi)
+    }}
   }}
 
-  # Find cells with >1 heavy
-  heavy_cells <- df[heavy_mask, cell_field]
-  tab <- table(heavy_cells)
-  multi_cells <- names(tab[tab > 1])
-
-  # Filter out those cells
   keep <- !(df[[cell_field]] %in% multi_cells)
   df2 <- df[keep, , drop=FALSE]
   df2
 }}
 
-if (mode == "per_file") {{
-  for (f in files) {{
-    df2 <- read_one(f)
-    base <- sub("\\\\.[^.]+$", "", basename(f))
-    out <- paste0("SC_noMH_", base, ".tsv")
-    write.table(df2, file=out, sep="\\t", quote=FALSE, row.names=FALSE)
-    cat(paste("Wrote", out, "rows:", nrow(df2), "\\n"))
-  }}
-}} else {{
-  lst <- lapply(files, read_one)
-  if (length(lst) == 0) {{
-    stop("No input tables after filtering.")
-  }}
-  merged <- do.call(rbind, lst)
-  if (nchar(sfield) > 0) {{
-    origins <- unlist(lapply(seq_along(files), function(i){{
-      base <- sub("\\\\.[^.]+$", "", basename(files[[i]]))
-      n <- nrow(lst[[i]])
-      if (n <= 0) return(character(0))
-      rep(base, n)
-    }}))
-    if (length(origins) == nrow(merged)) {{
-      merged[[sfield]] <- origins
-    }} else {{
-      warning("Could not add origin column (row mismatch).")
-    }}
-  }}
-  write.table(merged, file=out_merged, sep="\\t", quote=FALSE, row.names=FALSE)
-  cat(paste("Wrote", out_merged, "rows:", nrow(merged), "\\n"))
+lst <- lapply(files, read_one)
+if (length(lst) == 0) {{
+  stop("No input tables after filtering.")
 }}
+merged <- do.call(rbind, lst)
+write.table(merged, file=out_merged, sep="\t", quote=FALSE, row.names=FALSE)
+cat(paste("Wrote", out_merged, "rows:", nrow(merged), "\n"))
 """
         rfile.write_text(r_code, encoding="utf-8")
 
-        cmd = ["Rscript", "--vanilla", rfile.name, out_merged, mode, sfield] + names
+        cmd = ["Rscript", "--vanilla", rfile.name, out_merged, ",".join(heavy_values)] + names
         run_cmd(cmd, sess_dir, log)
 
         produced = []
-        if mode == "per_file":
-            for n in names:
-                stem = re.sub(r"\.[^.]+$", "", n)
-                out = f"SC_noMH_{stem}.tsv"
-                if (sess_dir / out).exists():
-                    a = Artifact(name=f"SC_NOMH_{stem}", path=out, kind="tab", from_step=idx)
-                    sess.artifacts[a.name] = a
-                    produced.append(a)
-            if produced:
-                sess.current["SC_TABLE"] = produced[0].name
-        else:
-            a = Artifact(name="SC_NO_MULTI_HEAVY", path=out_merged, kind="tab", from_step=idx)
-            sess.artifacts[a.name] = a
-            produced.append(a)
-            sess.current["SC_TABLE"] = a.name
+        a = Artifact(name="SC_NO_MULTI_HEAVY", path=out_merged, kind="tab", from_step=idx)
+        sess.artifacts[a.name] = a
+        produced.append(a)
+        sess.current["SC_TABLE"] = a.name
 
         return StepResult(step_index=idx, unit=self.id, params=params, produced=produced)
 
@@ -1069,19 +1045,12 @@ class U_SC_RemoveNoHeavy(UnitSpec):
     locus_field : text
         Column that denotes chain locus (default: 'locus').
     heavy_value : text
-        Value denoting heavy locus (default: 'IGH').
-    light_values : text
-        Comma/space-separated values denoting light loci (default: 'IGK, IGL').
+        Value denoting heavy locus (default: 'IGH'). Light loci IGK/IGL are assumed by default.
     cell_field : text
-        Column with cell identifier (default: 'cell_id') — required in input.
+        Column with cell identifier (default: 'cell_id') - required in input.
     fallback_from_vcall : select {'true','false'}
         If locus_field is missing, detect heavy via v_call =~ '^IGH' and light via v_call =~ '^IG[KL]'.
         Default true.
-    mode : select {'merge','per_file'}
-        'merge' → one file SC_no_heavy.tsv; 'per_file' → one file per input (SC_noH_<basename>.tsv).
-        In both cases SC_TABLE is set (first produced when per_file).
-    sample_field : text
-        When merging and non-empty, annotate each row with the filename stem.
     """
     def run(self, sess, sess_dir, params):
         import re
@@ -1350,12 +1319,13 @@ UNITS: Dict[str, UnitSpec] = {
         params_schema={
             "files": {"type":"text","placeholder":"file1.tsv file2.tsv (blank = all *.tsv/*.tsv.gz)"},
             "locus_field": {"type":"text","default":"locus","help":"Column with chain locus (IGH/IGK/IGL)"},
-            "heavy_value": {"type":"text","default":"IGH","help":"Value indicating heavy locus"},
+            "heavy_value": {
+                "type":"select",
+                "options":["IGH","TRA","TRB","TRA,TRB"],
+                "default":"IGH",
+                "help":"Heavy locus values (IGH for BCR, TRA/TRB for TCR; select 'TRA,TRB' to screen both)"
+            },
             "cell_field": {"type":"text","default":"cell_id","help":"Cell identifier column (required)"},
-            "fallback_from_vcall": {"type":"select","options":["true","false"],"default":"true",
-                                    "help":"If locus missing, detect heavy via v_call =~ '^IGH'"},
-            "mode": {"type":"select","options":["merge","per_file"],"default":"merge"},
-            "sample_field": {"type":"text","default":"sample_id","help":"Add origin column when merging"}
         },
     ),
     "sc_remove_no_heavy": U_SC_RemoveNoHeavy(
@@ -1367,12 +1337,9 @@ UNITS: Dict[str, UnitSpec] = {
             "files": {"type":"text","placeholder":"file1.tsv file2.tsv (blank = all *.tsv/*.tsv.gz)"},
             "locus_field": {"type":"text","default":"locus","help":"Column indicating locus (IGH/IGK/IGL)"},
             "heavy_value": {"type":"text","default":"IGH","help":"Value for heavy locus"},
-            "light_values": {"type":"text","default":"IGK, IGL","help":"Values for light loci"},
             "cell_field": {"type":"text","default":"cell_id","help":"Cell identifier column"},
             "fallback_from_vcall": {"type":"select","options":["true","false"],"default":"true",
                                     "help":"If locus missing, infer heavy/light from v_call"},
-            "mode": {"type":"select","options":["merge","per_file"],"default":"merge"},
-            "sample_field": {"type":"text","default":"sample_id","help":"Add origin column when merging"}
         },
     ),
 }
